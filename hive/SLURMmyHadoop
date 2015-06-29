@@ -1,0 +1,268 @@
+#!/bin/bash
+#SBATCH --partition=debug
+#SBATCH --time=00:20:00
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=2
+#SBATCH --exclusive
+#SBATCH --job-name="hive-compute"
+#SBATCH --output=test.out
+#SBATCH --mail-user=pn33@buffalo.edu
+#SBATCH --mail-type=END
+#Specifies that the job will be requeued after a node failure.
+#The default is that the job will not be requeued.
+#
+#This SLURM script is modified version of the SDSC script
+# found in /util/academic/myhadoop/myHadoop-0.30b/examples.
+# CDC January 29, 2015 
+#
+echo "SLURM_JOBID="$SLURM_JOBID
+echo "SLURM_JOB_NODELIST"=$SLURM_JOB_NODELIST
+echo "SLURM_NNODES"=$SLURM_NNODES
+echo "SLURMTMPDIR="$SLURMTMPDIR
+
+echo "working directory = "$SLURM_SUBMIT_DIR
+
+module load java/1.6.0_22
+module load hadoop/2.5.1
+module load hive/0.14.0
+module load myhadoop/0.30b
+module list
+echo "MH_HOME="$MH_HOME
+echo "HADOOP_HOME="$HADOOP_HOME
+echo "Setting HADOOP to use SLURMTMPDIR on the local disk"
+export MH_SCRATCH_DIR=$SLURMTMPDIR
+echo "MH_SCRATCH_DIR="$MH_SCRATCH_DIR
+#### Set this to the directory where Hadoop configs should be generated
+# Don't change the name of this variable (HADOOP_CONF_DIR) as it is
+# required by Hadoop - all config files will be picked up from here
+#
+# Make sure that this is accessible to all nodes
+export HADOOP_CONF_DIR=$SLURM_SUBMIT_DIR/config-$SLURM_JOBID
+export HIVE_CONF_DIR=$SLURM_SUBMIT_DIR/config-$SLURM_JOBID
+echo "create diretory for HIVE metadata"
+### Set up the configuration
+# Make sure number of nodes is the same as what you have requested from PBS
+# usage: $myhadoop-configure.sh -h
+# this is the non-persistent mode
+NPROCS=`srun --nodes=${SLURM_NNODES} bash -c 'hostname' |wc -l`
+echo "-------Set up the configurations for myHadoop"
+$MH_HOME/bin/myhadoop-configure.sh 
+#
+cp $HIVE_HOME/conf/hive-env.sh-sample $HIVE_CONF_DIR/hive-env.sh
+cp $HIVE_HOME/conf/hive-default.xml-sample $HIVE_CONF_DIR/hive-default.xml
+sed -i 's:MY_HIVE_SCRATCH:'"$SLURMTMPDIR"':g' $HIVE_CONF_DIR/hive-default.xml
+cp $HIVE_HOME/conf/hive-log4j.properties-sample $HIVE_CONF_DIR/hive-log4j.properties
+sed -i 's:MY_HIVE_DIR:'"$SLURM_SUBMIT_DIR"':' $HIVE_CONF_DIR/hive-log4j.properties
+ls -l $HADOOP_CONF_DIR
+echo "-------Start hdfs and yarn ---"
+$HADOOP_HOME/sbin/start-all.sh
+#### Format HDFS, if this is the first time or not a persistent instance
+echo "-------Show Report ---"
+#$HADOOP_HOME/bin/hadoop dfsadmin -report
+echo "-------make directory ---"
+# DON'T CHANGE THSES COMMAND, AS YOU WILL NEED THESE DIRECTORY FOR CREATING TABLE
+$HADOOP_HOME/bin/hdfs --config $HADOOP_CONF_DIR dfs -mkdir /tmp
+$HADOOP_HOME/bin/hdfs --config $HADOOP_CONF_DIR dfs -mkdir -p /user/hive/warehouse
+$HADOOP_HOME/bin/hdfs --config $HADOOP_CONF_DIR dfs -chmod g+w /tmp
+$HADOOP_HOME/bin/hdfs --config $HADOOP_CONF_DIR dfs -chmod g+w /user/hive/warehouse
+#echo "-------list warehouse directory ---"
+$HADOOP_HOME/bin/hdfs --config $HADOOP_CONF_DIR dfs -ls /user/hive/warehouse
+
+# echo 'deleting all the tables'
+# $HIVE_HOME/bin/hive -e 'use hw3; '
+# $HIVE_HOME/bin/hive -e 'show tables' | xargs -I '{}' $HIVE_HOME/bin/hive -e 'drop table {}'
+# $HIVE_HOME/bin/hive -e "DROP DATABASE IF EXISTS hw3;"
+# echo "Create database hw3"
+
+echo "Creating table stocks"
+$HIVE_HOME/bin/hive -e "drop table if exists stocks;"
+$HIVE_HOME/bin/hive -e "CREATE TABLE IF NOT EXISTS stocks (
+date STRING,
+price_open DOUBLE,
+price_high DOUBLE,
+price_low DOUBLE,
+price_close DOUBLE,
+volume DOUBLE,
+price_adj_close DOUBLE)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ',';"
+
+echo "Load data from the data of command line"
+$HIVE_HOME/bin/hive -e "LOAD DATA LOCAL INPATH '$1' OVERWRITE INTO TABLE stocks;"
+
+echo "creating Companies Table"
+$HIVE_HOME/bin/hive -e "drop table if exists companies;"
+$HIVE_HOME/bin/hive -e "create table if not exists companies ( name STRING, day INT, 
+  month INT, year INT, value DOUBLE) 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' ;"
+
+# echo "disbling vectorisation"
+# $HIVE_HOME/bin/hive -e "set hive.map.aggr =false;"
+# $HIVE_HOME/bin/hive -e  "set hive.vectorized.execution.reduce.enabled=false;"
+
+echo "Overide companies Table with the data"
+# $HIVE_HOME/bin/hive -e  "SELECT INPUT__FILE__NAME, * from stocks;"
+$HIVE_HOME/bin/hive -e "INSERT OVERWRITE TABLE companies  
+SELECT INPUT__FILE__NAME, day(date), month(date), year(date), price_adj_close 
+FROM stocks;"
+
+
+
+echo "creating Min max Table"
+$HIVE_HOME/bin/hive -e "drop table if exists min_max;"
+$HIVE_HOME/bin/hive -e "create table min_max(name STRING, year INT, month INT, max_day INT, min_day INT)
+    stored as sequencefile
+;"
+$HIVE_HOME/bin/hive -e "INSERT OVERWRITE TABLE min_max
+select
+    c.name, c.year, c.month,
+    max(struct(c.day, c.month, c.year)).col1 as max_day,
+    min(struct(c.day, c.month, c.year)).col1 as min_day
+from companies c
+group by c.name, c.month, c.year;"
+
+## testing
+##$HIVE_HOME/bin/hive -e "select c.name from companies c JOIN min_max m ON (c.day = m.max_day);"
+
+
+# echo "adding python files"
+# $HIVE_HOME/bin/hive -e "add FILE phase1_mapper.py;"
+# $HIVE_HOME/bin/hive -e "add FILE phase1_reducer.py;"
+# $HIVE_HOME/bin/hive -e "add FILE phase2_mapper.py;"
+# $HIVE_HOME/bin/hive -e "add FILE phase2_reducer.py;"
+
+echo "calculating the end and first value"
+$HIVE_HOME/bin/hive -e "drop table if exists end_table;"
+$HIVE_HOME/bin/hive -e "create table end_table(name STRING, year INT, month INT, end_value DOUBLE)
+    stored as sequencefile
+;"
+$HIVE_HOME/bin/hive -e "insert overwrite table end_table 
+select c.name, c.year, c.month, c.value from companies c 
+JOIN min_max m 
+ON (c.day = m.max_day and c.name=m.name and c.year=m.year and c.month = m.month);"
+$HIVE_HOME/bin/hive -e "drop table if exists start_table;"
+$HIVE_HOME/bin/hive -e "create table start_table(name STRING, year INT, month INT, start_value DOUBLE)
+    stored as sequencefile
+;"
+$HIVE_HOME/bin/hive -e "insert overwrite table start_table 
+select c.name, c.year, c.month, c.value from companies c 
+JOIN min_max m ON (c.day = m.min_day and c.name=m.name and c.year=m.year and c.month = m.month) ;"
+
+ # $HIVE_HOME/bin/hive -e "FROM (
+ #    FROM stocks
+ #    SELECT TRANSFORM(cast(INPUT__FILE__NAME as STRING), date, cast(price_adj_close as STRING))
+ #    USING 'python phase1_mapper.py'
+ #    as (company, year, month, date, value)
+ #    CLUSTER BY (company, year, month)) map_output
+ #  INSERT OVERWRITE TABLE reduce1
+ #    SELECT TRANSFORM(company, year, month, date, value)
+ #    USING 'python phase1_reducer.py'
+ #    AS company, value;"
+
+
+
+  echo "Storing xi values in single table"
+  $HIVE_HOME/bin/hive -e "drop table if exists xi_table;"
+  $HIVE_HOME/bin/hive -e "create table xi_table(name STRING, xi_value DOUBLE)
+    stored as sequencefile
+;"
+$HIVE_HOME/bin/hive -e "insert overwrite table xi_table
+select e.name, (e.end_value - s.start_value) / s.start_value from end_table e 
+JOIN start_table s ON (e.name = s.name and e.year = s.year and e.month = s.month);"
+
+echo "creating average table"
+$HIVE_HOME/bin/hive -e "drop table if exists avg_table;"
+$HIVE_HOME/bin/hive -e "create table avg_table(name STRING, avg DOUBLE) 
+stored as sequencefile;"
+$HIVE_HOME/bin/hive -e "insert overwrite table avg_table
+select name,  AVG(xi_value) from xi_table group by name;"
+
+# testing
+ # $HIVE_HOME/bin/hive -e  "select * from xi_table;"
+ # echo "avg table is"
+ # $HIVE_HOME/bin/hive -e  "select * from avg_table;"
+
+echo "creating temp table again"
+$HIVE_HOME/bin/hive -e "drop table if exists temp;"
+$HIVE_HOME/bin/hive -e "create table temp(name STRING, sqr DOUBLE) 
+stored as sequencefile;"
+$HIVE_HOME/bin/hive -e "insert overwrite table temp
+select x.name, (x.xi_value - a.avg) * (x.xi_value - a.avg) from xi_table x JOIN avg_table a ON (x.name = a.name);"
+
+# echo "creating temp table for vol calculation"
+# $HIVE_HOME/bin/hive -e "drop table if exists temp;"
+# $HIVE_HOME/bin/hive -e "create table temp(name STRING, sqr DOUBLE) 
+# stored as sequencefile;"
+# $HIVE_HOME/bin/hive -e "insert overwrite table temp  
+# select x.name, (x.xi_value - a.avg) * (x.xi_value - a.avg) from xi_table x JOIN avg_table a ON (x.name = a.name);"
+
+# testing
+# $HIVE_HOME/bin/hive -e  "select * from temp;"
+
+echo "creating count table"
+$HIVE_HOME/bin/hive -e "drop table if exists count_table;"
+$HIVE_HOME/bin/hive -e "create table count_table(name STRING,sum DOUBLE, count INT) stored as sequencefile;"
+$HIVE_HOME/bin/hive -e "insert overwrite table count_table
+select name, sum(sqr), count(name) from temp group by name;"
+
+
+# testing
+# $HIVE_HOME/bin/hive -e  "select * from count_table;"
+
+echo "creating the final output files"
+$HIVE_HOME/bin/hive -e "drop table if exists vol_table;"
+$HIVE_HOME/bin/hive -e "create table vol_table(name STRING,vol DOUBLE) 
+stored as sequencefile;"
+$HIVE_HOME/bin/hive -e "insert overwrite table vol_table
+select name, sqrt(sum / (count - 1)) from count_table where count > 1
+group by name, sum, count;"
+
+# testing
+# $HIVE_HOME/bin/hive -e  "select * from vol_table;"
+echo "Printing the output"
+echo "the top 10 values are"
+$HIVE_HOME/bin/hive -e "SELECT * FROM vol_table where vol != 0.0 SORT BY vol DESC LIMIT 10"
+
+echo "the bottom 10 values are"
+$HIVE_HOME/bin/hive -e "SELECT * FROM vol_table where vol != 0.0 SORT BY vol ASC LIMIT 10"
+
+
+
+
+
+  # echo "run second map reduce job"
+  # $HIVE_HOME/bin/hive -e "FROM (
+  #      FROM reduce1
+  #      SELECT TRANSFORM(company, value)
+  #      USING 'python phase2_mapper.py'
+  #      as (company, value)
+  #    CLUSTER BY (company)) map_output
+  #  INSERT OVERWRITE TABLE vol
+  #    SELECT TRANSFORM(company, value)
+  #    USING 'python phase2_reducer.py'
+  #    AS company, volatility;"
+
+  # echo "Select the top 10 records"
+  # $HIVE_HOME/bin/hive -e "SELECT * FROM vol SORT BY volatility ASC LIMIT 10"
+  # echo "select the bottom 10 recods"
+  # $HIVE_HOME/bin/hive -e "SELECT * FROM hw3.vol SORT BY volatility DESC LIMIT 10"
+
+
+#echo "show database"
+#$HIVE_HOME/bin/hive -e "SHOW DATABASES;"
+
+#echo " add file splitter in hive prompt"
+#$HIVE_HOME/bin/hive -e "add FILE splitter.py;"
+
+#echo " run python script"
+#$HIVE_HOME/bin/hive -e "
+#INSERT OVERWRITE TABLE words 
+#  SELECT TRANSFORM(text) 
+#    USING 'python splitter.py' 
+#    AS word
+#FROM doc;"
+
+echo "-------Stop hdfs and yarn ---"
+$HADOOP_HOME/sbin/stop-all.sh
+
+#### Clean up the working directories after job completion
+$MH_HOME/bin/myhadoop-cleanup.sh

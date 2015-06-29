@@ -1,0 +1,20 @@
+stocks = load 'hdfs:///pigdata/' using PigStorage(',','-tagFile');
+register 'hdfs:///pigjar/hw3.jar';
+
+temp = filter stocks by $1!='Date';  
+first = FOREACH temp GENERATE $0 as name, FLATTEN(STRSPLIT($1,'-')) as (year, month, day), $7 as adj_close;
+grpd = group first by (name, year, month);
+xi_table = foreach grpd generate hw3.Calculate_xi($1) as xi_new:chararray;
+A= foreach xi_table GENERATE FLATTEN(STRSPLIT(xi_new,'\t')) as (name:chararray,xi:double);
+B = group A by name;
+C = foreach B generate hw3.Calculate_vol($1);
+D = foreach C generate flatten(STRSPLIT($0, '\t')); 
+vol_table = foreach D generate $0 as name, (double)$1 as vol;
+e = filter vol_table by vol != 0.0;
+res = ORDER e by vol ASC;
+toplist = LIMIT res 10;
+resd = ORDER e by vol DESC;
+bottomlist = LIMIT resd 10;
+RESULT = UNION toplist,bottomlist;
+DUMP RESULT;
+store RESULT into 'hdfs:///pigdata/vol_out'; 
